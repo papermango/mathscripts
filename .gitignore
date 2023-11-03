@@ -1,0 +1,4 @@
+# Haskell build files
+*.hi
+*.o
+*.exe
