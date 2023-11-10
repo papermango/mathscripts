@@ -13,6 +13,7 @@ data State = State [Main.Word] Main.Word Int | Halted Int | Empty
 instance Show State where
     show (State p w i) = printer w ++ " at step " ++ show i
     show (Halted i) = "Halted at step " ++ show i
+    show Empty = "Empty (past-the-end) state"
 
 -- Logic to update the machine at each step
 
@@ -20,6 +21,7 @@ update :: State -> State
 update (State (p:productions) (Zero:xs) i) = State productions xs (i + 1)
 update (State (p:productions) (One:xs) i) = State productions (xs ++ p) (i + 1)
 update (State _ [] i) = Halted i
+update (State [] xs i) = State [] xs i
 update (Halted i) = Empty
 update Empty = Empty
 
