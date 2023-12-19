@@ -1,5 +1,8 @@
 import Options.Applicative
 import Text.Read (readMaybe)
+import Data.List.Split (splitOn)
+import Data.List (dropWhileEnd)
+import Data.Char (isSpace)
 
 --- Basic type definitions ---
 
@@ -15,20 +18,24 @@ printer (Zero:xs) = "0" ++ printer xs
 printer (One:xs) = "1" ++ printer xs
 
 -- Encapsulates the state of the system at a snapshot
-data State = State [Main.Word] Main.Word Int
+-- First Int is step count, second is number of productions (and should be kept constant)
+data State = State [Main.Word] Main.Word Int Int
             | Halted Int
             | Empty
 
--- Defines Show and Eq  on states
+-- Defines Show and Eq on states
 -- Eq is a weaker equality which considers repeated states equal
 -- Possible way to find true repeats that accounts for duplicate words:
     -- zip productions with indices and match on both of them
 instance Show State where
-    show (State p w i) = printer w ++ " at step " ++ show i ++ ", next production " ++ printer (head p)
+    show (State p w i _) = printer w ++ " at step " ++ show i ++ ", next production " ++ printer (head p)
     show (Halted i) = "Halted at step " ++ show i
     show Empty = "N/A"
 instance Eq State where
-    (==) (State p1 w1 _) (State p2 w2 _) = (head p1 == head p2) && (w1 == w2)
+    (==) (State p1 w1 i1 ps1) (State p2 w2 i2 ps2) = (head p1 == head p2) 
+        && (w1 == w2) 
+        && (ps1 == ps2) -- technically always true, since program execution only ever considers one CTS
+        && (rem i1 ps1 == rem i2 ps2)
     (==) State {} _ = False
     (==) _ State {}  = False
     (==) _ _ = True
@@ -37,10 +44,10 @@ instance Eq State where
 
 -- Logic to update the machine at each step
 update :: State -> State
-update (State (p:productions) (Zero:xs) i) = State productions xs (i + 1)
-update (State (p:productions) (One:xs) i) = State productions (xs ++ p) (i + 1)
-update (State _ [] i) = Halted i
-update (State [] xs i) = Empty -- invalid state
+update (State (p:productions) (Zero:xs) i ps) = State productions xs (i + 1) ps
+update (State (p:productions) (One:xs) i ps) = State productions (xs ++ p) (i + 1) ps
+update (State _ [] i _) = Halted i
+update (State [] xs i _) = Empty -- invalid state; cycle throws error on an empty list, so this may not be needed
 update (Halted i) = Empty
 update Empty = Empty -- invalid state
 
@@ -49,12 +56,12 @@ runMachine :: Int -> State -> [State]
 runMachine n initstate = take (n + 1) (iterate update initstate)
 
 runMachineFromInputs :: Int -> [Main.Word] -> Main.Word -> [State]
-runMachineFromInputs n productions word = runMachine n (State (cycle productions) word 0)
+runMachineFromInputs n productions word = runMachine n (State (cycle productions) word 0 (length productions))
 
 -- Pretty-print each state in sequence
 alignout :: State -> String
-alignout (State p w i) = replicate i ' ' ++ show (State p w i) ++ "\n"
-alignout (Halted i) = replicate (i + 1) ' ' ++ show (Halted i) ++ "\n"
+alignout s@(State p w i _) = replicate i ' ' ++ show s ++ "\n"
+alignout s@(Halted i) = replicate (i + 1) ' ' ++ show s ++ "\n"
 alignout Empty = ""
 printoutputs :: [State] -> String
 printoutputs = concatMap alignout
@@ -65,6 +72,13 @@ findrepeatedstate :: [State] -> State
 findrepeatedstate [] = Empty
 findrepeatedstate (s:states) = if s `elem` states then s else findrepeatedstate states
 
+-- Finds last state in a CTS
+findLast :: [State] -> State
+findLast [] = Empty
+findLast (x:xs)
+            | x == Halted 0 = x
+            | null xs       = x
+            | otherwise = findLast xs 
 --- Default variables ---
 
 defProds :: [Main.Word]
@@ -107,7 +121,7 @@ parseoptions = Options
     <*> switch
         ( long "integerinput"
         <> short 'i'
-        <> help "Input initial machine state with unsigned integer encoding" )
+        <> help "Input initial machine state with unsigned integer representation" )
     <*> input -- Machine input parser, see below
 
 -- Wraps parser up with high-level help text and adds --help
@@ -115,13 +129,14 @@ opts :: ParserInfo Options
 opts = info (parseoptions <**> helper)
     ( fullDesc
     <> progDesc "Simulate a cyclic tag system to a given number of steps. Halts are recognized only if the register clears. Optionally looks for repeating states after execution, which is the standard way to interpret halting in a cyclic tag system. Looking for repeats is quadratic in the number of steps run and linear in register length."
-    <> header "ctshs - a cyclic tag system simulator written in Haskell")
+    <> header "cyts - a cyclic tag system simulator written in Haskell")
 
 -- Parser for machine input --
 
 data Input
   = FileInput FilePath
   | StdInput
+  | CompactInput String
 
 fileInput :: Parser Input
 fileInput = FileInput <$> strOption
@@ -136,9 +151,15 @@ stdInput = flag' StdInput
   <> short 's'
   <> help "Read initial machine state from stdin" )
 
+cmdInput :: Parser Input
+cmdInput = CompactInput <$> strOption
+  (  long "compact"
+  <> short 'c'
+  <> help "Compact (scripting) mode. Reads initial machine state from command line as a comma-separated string and returns the step at which the machine halted, -1 if not halted. Overrides -v and -r." )
+
 -- optional sets input to be optional
 input :: Parser (Maybe Input)
-input = optional $ fileInput <|> stdInput
+input = optional $ fileInput <|> stdInput <|> cmdInput
 
 --- Read machine input ---
 
@@ -169,6 +190,13 @@ readIntsAsBins = map (readIntAsBin . maybe 0 id)
                     . map (\x -> readMaybe x :: Maybe Int)
                     . words
 
+-- Trim whitespace, from StackOverflow
+trim = dropWhileEnd isSpace . dropWhile isSpace
+
+-- Reads off comma-separated ints into a list of words
+readCIntsAsBins :: String -> [Main.Word]
+-- readCIntsAsBins = map () . splitOn "," 
+
 --- Execution code ---
 
 main :: IO ()
@@ -178,9 +206,15 @@ main = execute =<< execParser opts
 execute :: Options -> IO ()
 -- No input; default execution
 execute opts@(Options _ _ _ _ Nothing) = executeOnInput opts defProds defWord
+-- Compact (scripting) input
+-- Overrides two bucketed options, so it goes first
+execute (Options _ steps _ True (Just (CompactInput input))) = print "Unimplemented"
+execute (Options _ steps _ False (Just (CompactInput input))) =  print "Unimplemented"
+
 -- File input
 execute opts@(Options _ _ _ True (Just (FileInput fp))) = print "Unimplemented"
 execute opts@(Options _ _ _ False (Just (FileInput fp))) =  print "Unimplemented"
+
 -- Stdin input
 execute opts@(Options _ _ _ True (Just StdInput)) = do
     putStrLn "Enter starting word as an integer: "
@@ -205,7 +239,7 @@ printProductions prod = putStr "Productions: " >> print (map printer prod) >> pu
 
 -- Prints a found repeated state in a given machine
 printFoundRepeatedState :: [State] -> IO ()
-printFoundRepeatedState = (putStr "Repeated state at " >>) . print . findrepeatedstate
+printFoundRepeatedState = (putStr "Repeated/halted state at " >>) . print . findrepeatedstate
 
 -- Runs and prints the machine, including repeated state if asked for via True bool
 printShortMachine :: Int -> [Main.Word] -> Main.Word -> Bool -> IO ()
@@ -213,7 +247,7 @@ printShortMachine steps productions word findrepeats = do
     printProductions productions
     print (head machineout)
     putStrLn ""
-    print (last machineout) -- needs to be replaced with code that finds a halt if it happens and prints that
+    print (findLast machineout)
     if findrepeats then printFoundRepeatedState machineout else putStr ""
         where machineout = runMachineFromInputs steps productions word
 
